@@ -201,11 +201,11 @@ def print_results(results: dict):
 
     # Horizon diagram
     print(f"\n" + "-" * 40)
-    print_horizon(s['azimuth'], b['ocean_view_start'], b['ocean_view_end'])
+    print_horizon(s['azimuth'], b['ocean_view_start'], b['ocean_view_end'], warnings)
 
 
-def print_horizon(sun_az: float, view_start: float, view_end: float):
-    """Print simple horizon diagram"""
+def print_horizon(sun_az: float, view_start: float, view_end: float, features: list = None):
+    """Print horizon diagram with features"""
     print("\n  S        SW        W        NW        N")
     print("  180      225      270      315      360")
     print("  |--------|--------|--------|--------|")
@@ -213,12 +213,30 @@ def print_horizon(sun_az: float, view_start: float, view_end: float):
     # Build horizon line
     line = list("  " + "-" * 40)
 
-    # Mark ocean view
+    # Mark land (outside ocean view)
     for az in range(180, 361, 5):
         pos = 2 + int((az - 180) / 180 * 40)
         if 0 <= pos < len(line):
-            if is_in_view(az, view_start, view_end):
+            if not is_in_view(az, view_start, view_end):
+                line[pos] = "#"
+            else:
                 line[pos] = "~"
+
+    # Mark features (islands, capes) from headland_warnings
+    if features:
+        for feat in features:
+            # Parse bearing from warning string like "Island 'X' at 207° (1.3km)"
+            import re
+            match = re.search(r'at (\d+)°', feat)
+            if match:
+                feat_az = int(match.group(1))
+                if 180 <= feat_az <= 360:
+                    pos = 2 + int((feat_az - 180) / 180 * 40)
+                    if 0 <= pos < len(line):
+                        if 'island' in feat.lower():
+                            line[pos] = "^"  # Island
+                        else:
+                            line[pos] = "#"  # Cape/headland
 
     # Mark sun
     if 180 <= sun_az <= 360:
@@ -229,7 +247,7 @@ def print_horizon(sun_az: float, view_start: float, view_end: float):
         print("".join(sun_line) + "  <- sun")
 
     print("".join(line))
-    print("\n  ~ = ocean   * = sunset")
+    print("\n  ~ = ocean  # = land  ^ = island  * = sunset")
 
 
 # ============================================================================
