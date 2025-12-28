@@ -252,33 +252,28 @@ def print_horizon(sun_az: float, view_start: float, view_end: float, features: l
     print("  180      225      270      315      360")
     print("  |--------|--------|--------|--------|")
 
-    # Build horizon line
-    line = list("  " + "-" * 40)
+    # Build horizon line - iterate by position to avoid gaps
+    line = list("  ")
+    for pos in range(40):
+        # Convert position to azimuth
+        az = 180 + (pos / 40) * 180
+        if is_in_view(az, view_start, view_end):
+            line.append("~")
+        else:
+            line.append("#")
 
-    # Mark land (outside ocean view)
-    for az in range(180, 361, 5):
-        pos = 2 + int((az - 180) / 180 * 40)
-        if 0 <= pos < len(line):
-            if not is_in_view(az, view_start, view_end):
-                line[pos] = "#"
-            else:
-                line[pos] = "~"
-
-    # Mark features (islands, capes) from headland_warnings
+    # Mark islands only (not capes - they're already reported in text)
     if features:
+        import re
         for feat in features:
-            # Parse bearing from warning string like "Island 'X' at 207° (1.3km)"
-            import re
-            match = re.search(r'at (\d+)°', feat)
-            if match:
-                feat_az = int(match.group(1))
-                if 180 <= feat_az <= 360:
-                    pos = 2 + int((feat_az - 180) / 180 * 40)
-                    if 0 <= pos < len(line):
-                        if 'island' in feat.lower():
-                            line[pos] = "^"  # Island
-                        else:
-                            line[pos] = "#"  # Cape/headland
+            if 'island' in feat.lower():
+                match = re.search(r'at (\d+)°', feat)
+                if match:
+                    feat_az = int(match.group(1))
+                    if 180 <= feat_az <= 360:
+                        pos = 2 + int((feat_az - 180) / 180 * 40)
+                        if 0 <= pos < len(line):
+                            line[pos] = "^"
 
     # Mark sun
     if 180 <= sun_az <= 360:
