@@ -24,6 +24,8 @@ from datetime import datetime, timedelta
 from coastline_analyzer import (
     analyze_coastline,
     search_beach_osm,
+    geocode_location,
+    find_beaches_near,
     get_direction_name,
     BeachOrientation
 )
@@ -48,6 +50,7 @@ def estimate_timezone(lat: float, lon: float) -> float:
 def find_beach(query: str) -> dict:
     """
     Find a beach by name using OpenStreetMap Nominatim.
+    If no beach found by name, geocodes the query and finds nearest beach.
 
     Returns dict with: name, lat, lon, display_name
     """
@@ -60,14 +63,39 @@ def find_beach(query: str) -> dict:
         if 'beach' not in query.lower():
             results = search_beach_osm(query + " beach")
 
-    if not results:
+    if results:
+        best = results[0]
+        print(f"Found: {best['name'][:60]}...")
+        return {
+            'name': query,  # Use user's query as name
+            'lat': best['lat'],
+            'lon': best['lon'],
+            'display_name': best['name']
+        }
+
+    # Fallback: geocode the query and find nearest beach
+    print(f"No beach named '{query}' found, searching for nearest beach...")
+
+    try:
+        location = geocode_location(query)
+        print(f"Location: {location['display_name'][:60]}...")
+    except ValueError:
         raise ValueError(f"Could not find '{query}'. Try being more specific or use --lat/--lon.")
 
-    best = results[0]
-    print(f"Found: {best['name'][:60]}...")
+    # Search for beaches near this location, expanding radius if needed
+    for radius in [5000, 10000, 20000]:
+        beaches = find_beaches_near(location['lat'], location['lon'], radius)
+        if beaches:
+            break
+
+    if not beaches:
+        raise ValueError(f"No beaches found within 20km of '{query}'.")
+
+    best = beaches[0]
+    print(f"Nearest beach: {best['name']} ({best['distance_m']/1000:.1f}km away)")
 
     return {
-        'name': query,  # Use user's query as name
+        'name': best['name'],
         'lat': best['lat'],
         'lon': best['lon'],
         'display_name': best['name']

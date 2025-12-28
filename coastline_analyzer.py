@@ -482,6 +482,100 @@ def get_direction_name(azimuth: float) -> str:
 # BEACH LOOKUP FROM OSM
 # ============================================================================
 
+def geocode_location(query: str) -> Dict:
+    """
+    Geocode any location query using OSM Nominatim.
+
+    Returns dict with: lat, lon, display_name
+    Raises ValueError if not found.
+    """
+    base_url = "https://nominatim.openstreetmap.org/search"
+
+    params = {
+        'q': query,
+        'format': 'json',
+        'limit': 1
+    }
+
+    url = base_url + "?" + urllib.parse.urlencode(params)
+
+    try:
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            results = json.loads(response.read().decode('utf-8'))
+
+        if not results:
+            raise ValueError(f"Could not find location: {query}")
+
+        r = results[0]
+        return {
+            'lat': float(r['lat']),
+            'lon': float(r['lon']),
+            'display_name': r.get('display_name', query)
+        }
+
+    except urllib.error.URLError as e:
+        raise ValueError(f"Geocoding failed: {e}")
+
+
+def find_beaches_near(lat: float, lon: float, radius_m: float = 5000) -> List[Dict]:
+    """
+    Find beaches near a given location using OSM Overpass API.
+
+    Args:
+        lat: center latitude
+        lon: center longitude
+        radius_m: search radius in meters
+
+    Returns:
+        List of beaches sorted by distance, each with: name, lat, lon, distance_m
+    """
+    query = f"""
+    [out:json][timeout:30];
+    (
+      way["natural"="beach"](around:{radius_m},{lat},{lon});
+      node["natural"="beach"](around:{radius_m},{lat},{lon});
+    );
+    out center;
+    """
+
+    try:
+        result = fetch_with_retry(query)
+
+        beaches = []
+        for element in result.get('elements', []):
+            # Get coordinates
+            if element['type'] == 'node':
+                beach_lat, beach_lon = element['lat'], element['lon']
+            elif 'center' in element:
+                beach_lat = element['center']['lat']
+                beach_lon = element['center']['lon']
+            else:
+                continue
+
+            tags = element.get('tags', {})
+            name = tags.get('name', 'Unnamed Beach')
+
+            distance = haversine_distance(lat, lon, beach_lat, beach_lon)
+
+            beaches.append({
+                'name': name,
+                'lat': beach_lat,
+                'lon': beach_lon,
+                'distance_m': distance
+            })
+
+        # Sort by distance
+        beaches.sort(key=lambda x: x['distance_m'])
+        return beaches
+
+    except Exception as e:
+        print(f"Warning: Beach search failed: {e}")
+        return []
+
+
 def search_beach_osm(name: str, country: str = None) -> List[Dict]:
     """
     Search for a beach by name using OSM Nominatim.
@@ -512,8 +606,14 @@ def search_beach_osm(name: str, country: str = None) -> List[Dict]:
 
         beaches = []
         for r in results:
-            # Filter for beaches
-            if 'beach' in r.get('type', '').lower() or 'beach' in r.get('display_name', '').lower():
+            result_type = r.get('type', '').lower()
+            result_class = r.get('class', '').lower()
+
+            # Only match actual beaches (type=beach or class=natural with beach type)
+            is_beach = (result_type == 'beach' or
+                       (result_class == 'natural' and 'beach' in result_type))
+
+            if is_beach:
                 beaches.append({
                     'name': r.get('display_name', ''),
                     'lat': float(r['lat']),
