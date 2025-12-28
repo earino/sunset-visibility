@@ -15,6 +15,7 @@ import math
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
@@ -103,6 +104,39 @@ class BeachOrientation:
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
+def fetch_with_retry(query: str, max_retries: int = 3) -> dict:
+    """Fetch from Overpass API with exponential backoff"""
+    import time
+
+    for attempt in range(max_retries):
+        try:
+            data = urllib.parse.urlencode({'data': query}).encode('utf-8')
+            req = urllib.request.Request(OVERPASS_URL, data=data)
+            req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
+
+            timeout = 30 + (attempt * 15)  # Increase timeout each retry
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode('utf-8'))
+
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 504, 503):  # Rate limit or timeout
+                wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
+                if attempt < max_retries - 1:
+                    print(f"  Server busy, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            raise
+        except urllib.error.URLError as e:
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 2
+                print(f"  Connection error, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise
+
+    return {}
+
+
 def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List[Tuple[float, float]]]:
     """
     Fetch coastline data from OSM Overpass API.
@@ -127,12 +161,7 @@ def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List
     """
 
     try:
-        data = urllib.parse.urlencode({'data': query}).encode('utf-8')
-        req = urllib.request.Request(OVERPASS_URL, data=data)
-        req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
-
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
+        result = fetch_with_retry(query)
 
         # Parse the result
         nodes = {}
@@ -157,7 +186,7 @@ def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List
         return coastlines
 
     except Exception as e:
-        print(f"Warning: Could not fetch OSM data: {e}")
+        print(f"Warning: Could not fetch coastline data: {e}")
         return []
 
 
@@ -182,12 +211,7 @@ def fetch_nearby_features(lat: float, lon: float, radius_m: float = 5000) -> Dic
     """
 
     try:
-        data = urllib.parse.urlencode({'data': query}).encode('utf-8')
-        req = urllib.request.Request(OVERPASS_URL, data=data)
-        req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
-
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
+        result = fetch_with_retry(query)
 
         features = {
             'capes': [],
