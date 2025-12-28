@@ -186,22 +186,36 @@ def print_results(results: dict):
     print(f"\n" + "-" * 40)
     if v['sun_sets_over_ocean']:
         print("YES - Sunset WILL be visible over the ocean!")
+
+        # Show detected features (islands, capes)
+        warnings = results.get('analysis', {}).get('headland_warnings', [])
+        if warnings:
+            print(f"\nNearby features:")
+            for w in warnings:
+                print(f"  - {w}")
+
+        print(f"\nConfidence: {v['confidence']}")
+
+        # Only show horizon diagram when sunset is visible
+        print(f"\n" + "-" * 40)
+        print_horizon(s['azimuth'], b['ocean_view_start'], b['ocean_view_end'], warnings)
     else:
         print("NO - Sunset will NOT be over the ocean")
-        print(f"  Sun at {s['azimuth']}° is outside ocean view ({b['ocean_view_start']:.0f}°-{b['ocean_view_end']:.0f}°)")
 
-    # Show detected features (islands, capes)
-    warnings = results.get('analysis', {}).get('headland_warnings', [])
-    if warnings:
-        print(f"\nNearby features:")
-        for w in warnings:
-            print(f"  - {w}")
+        # Explain WHY
+        facing_dir = b['facing']
+        sun_dir = s['direction']
 
-    print(f"\nConfidence: {v['confidence']}")
+        if 'east' in facing_dir:
+            print(f"\n  This beach faces {facing_dir} - it's a SUNRISE beach.")
+            print(f"  The sunset ({sun_dir}) is behind you.")
+        elif 'north' in facing_dir or 'south' in facing_dir:
+            print(f"\n  This beach faces {facing_dir}.")
+            print(f"  The sunset is at {s['azimuth']}° ({sun_dir}), outside your view.")
+        else:
+            print(f"\n  Sun at {s['azimuth']}° is outside ocean view ({b['ocean_view_start']:.0f}°-{b['ocean_view_end']:.0f}°)")
 
-    # Horizon diagram
-    print(f"\n" + "-" * 40)
-    print_horizon(s['azimuth'], b['ocean_view_start'], b['ocean_view_end'], warnings)
+        print(f"\nConfidence: {v['confidence']}")
 
 
 def print_horizon(sun_az: float, view_start: float, view_end: float, features: list = None):

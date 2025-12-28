@@ -104,7 +104,7 @@ class BeachOrientation:
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-def fetch_with_retry(query: str, max_retries: int = 3) -> dict:
+def fetch_with_retry(query: str, max_retries: int = 5) -> dict:
     """Fetch from Overpass API with exponential backoff"""
     import time
 
@@ -114,13 +114,13 @@ def fetch_with_retry(query: str, max_retries: int = 3) -> dict:
             req = urllib.request.Request(OVERPASS_URL, data=data)
             req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
 
-            timeout = 30 + (attempt * 15)  # Increase timeout each retry
+            timeout = 45 + (attempt * 20)  # 45, 65, 85, 105, 125 seconds
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 return json.loads(response.read().decode('utf-8'))
 
         except urllib.error.HTTPError as e:
-            if e.code in (429, 504, 503):  # Rate limit or timeout
-                wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
+            if e.code in (429, 504, 503, 502):  # Rate limit or server errors
+                wait_time = (2 ** attempt) * 3  # 3, 6, 12, 24, 48 seconds
                 if attempt < max_retries - 1:
                     print(f"  Server busy, retrying in {wait_time}s...")
                     time.sleep(wait_time)
@@ -128,8 +128,15 @@ def fetch_with_retry(query: str, max_retries: int = 3) -> dict:
             raise
         except urllib.error.URLError as e:
             if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) * 2
+                wait_time = (2 ** attempt) * 3
                 print(f"  Connection error, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise
+        except TimeoutError:
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 3
+                print(f"  Timeout, retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             raise
