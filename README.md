@@ -142,13 +142,34 @@ Confidence: medium
 
 - Python 3.7+
 - No external dependencies (standard library only)
-- Internet connection (for OSM queries)
+- Internet connection (for OSM and GeoNames API queries)
+
+## Timezone Accuracy
+
+For accurate timezone detection, the tool uses the [GeoNames API](http://www.geonames.org/export/web-services.html).
+By default it uses the `demo` account which has limited daily requests.
+
+For unlimited requests, [register for a free GeoNames account](http://www.geonames.org/login) and set:
+
+```bash
+export GEONAMES_USERNAME=your_username
+```
+
+If the API is unavailable, the tool falls back to longitude-based estimation (which may be off by 1-2 hours in some regions, but doesn't affect the sunset azimuth calculation).
 
 ## How Accurate?
 
-- **Solar calculations**: NOAA algorithm, verified against timeanddate.com
-- **Beach orientation**: Calculated from OSM coastline geometry
-- **Confidence levels**: high/medium/low based on coastline complexity
+- **Solar calculations**: NOAA algorithm, verified against timeanddate.com (±1 minute, ±0.3° azimuth)
+- **Beach orientation**: Calculated algorithmically from OSM coastline geometry
+- **Confidence levels**: high/medium/low based on coastline data quality
+
+### Caveats
+
+- **Timezone**: Uses GeoNames API for accurate timezone detection. Falls back to longitude estimation if unavailable (see [Timezone Accuracy](#timezone-accuracy) above).
+- **Coastline heuristics**: Beach orientation is derived from nearby OSM coastline data. Complex coastlines or sparse data may yield less accurate results. The confidence level indicates data quality.
+- **Polar regions**: Properly detects midnight sun and polar night.
+- **Position on beach**: Results are for the geocoded point. Your actual view may vary depending on where you stand on the beach.
+- **Lakes supported**: Works with large lakes (Great Lakes, etc.) in addition to ocean coastlines. Lake shoreline orientation is detected automatically.
 
 ## License
 

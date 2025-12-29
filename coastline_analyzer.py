@@ -13,11 +13,17 @@ So the normal vector pointing right of travel direction = pointing to ocean.
 
 import math
 import json
+import sys
 import urllib.request
 import urllib.parse
 import urllib.error
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
+
+
+def _log(message: str):
+    """Print status message to stderr (not mixed with output)"""
+    print(message, file=sys.stderr)
 
 # ============================================================================
 # GEOMETRY UTILITIES
@@ -87,15 +93,16 @@ class BeachOrientation:
     """Calculated beach orientation from coastline analysis"""
     latitude: float
     longitude: float
-    facing_azimuth: float  # Direction the beach faces (toward ocean)
+    facing_azimuth: float  # Direction the beach faces (toward water)
     facing_direction: str  # Human readable (e.g., "west")
-    ocean_view_start: float  # Left edge of ocean view
-    ocean_view_end: float  # Right edge of ocean view
+    ocean_view_start: float  # Left edge of water view
+    ocean_view_end: float  # Right edge of water view
     coastline_bearing: float  # Local coastline direction
     confidence: str  # "high", "medium", "low"
     headland_warnings: List[str]  # Potential obstructions detected
     analysis_radius_m: float  # How far we looked for coastline
     coastline_points_found: int
+    is_lake: bool = False  # True if this is a lake rather than ocean
 
 
 # ============================================================================
@@ -122,21 +129,21 @@ def fetch_with_retry(query: str, max_retries: int = 5) -> dict:
             if e.code in (429, 504, 503, 502):  # Rate limit or server errors
                 wait_time = (2 ** attempt) * 3  # 3, 6, 12, 24, 48 seconds
                 if attempt < max_retries - 1:
-                    print(f"  Server busy, retrying in {wait_time}s...")
+                    _log(f"  Server busy, retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
             raise
         except urllib.error.URLError as e:
             if attempt < max_retries - 1:
                 wait_time = (2 ** attempt) * 3
-                print(f"  Connection error, retrying in {wait_time}s...")
+                _log(f"  Connection error, retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             raise
         except TimeoutError:
             if attempt < max_retries - 1:
                 wait_time = (2 ** attempt) * 3
-                print(f"  Timeout, retrying in {wait_time}s...")
+                _log(f"  Timeout, retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             raise
@@ -144,9 +151,17 @@ def fetch_with_retry(query: str, max_retries: int = 5) -> dict:
     return {}
 
 
-def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List[Tuple[float, float]]]:
+@dataclass
+class CoastlineData:
+    """Coastline data with type information"""
+    ways: List[List[Tuple[float, float]]]
+    is_lake: bool  # True if from lake/water body, False if ocean coastline
+
+
+def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> CoastlineData:
     """
     Fetch coastline data from OSM Overpass API.
+    First tries ocean coastlines, then falls back to lake/water body shorelines.
 
     Args:
         lat: center latitude
@@ -154,9 +169,23 @@ def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List
         radius_m: search radius in meters
 
     Returns:
-        List of coastline ways, each way is a list of (lat, lon) points
+        CoastlineData with list of ways and type indicator
     """
-    # Overpass QL query for coastlines
+    # Try ocean coastline first
+    coastlines = _fetch_ocean_coastline(lat, lon, radius_m)
+    if coastlines:
+        return CoastlineData(ways=coastlines, is_lake=False)
+
+    # No ocean coastline - try lake/water body shorelines
+    coastlines = _fetch_lake_shoreline(lat, lon, radius_m)
+    if coastlines:
+        return CoastlineData(ways=coastlines, is_lake=True)
+
+    return CoastlineData(ways=[], is_lake=False)
+
+
+def _fetch_ocean_coastline(lat: float, lon: float, radius_m: float) -> List[List[Tuple[float, float]]]:
+    """Fetch ocean coastline (natural=coastline)"""
     query = f"""
     [out:json][timeout:30];
     (
@@ -169,32 +198,85 @@ def fetch_coastline(lat: float, lon: float, radius_m: float = 2000) -> List[List
 
     try:
         result = fetch_with_retry(query)
-
-        # Parse the result
-        nodes = {}
-        ways = []
-
-        for element in result.get('elements', []):
-            if element['type'] == 'node':
-                nodes[element['id']] = (element['lat'], element['lon'])
-            elif element['type'] == 'way':
-                ways.append(element.get('nodes', []))
-
-        # Convert ways to coordinate lists
-        coastlines = []
-        for way in ways:
-            coords = []
-            for node_id in way:
-                if node_id in nodes:
-                    coords.append(nodes[node_id])
-            if len(coords) >= 2:
-                coastlines.append(coords)
-
-        return coastlines
-
+        return _parse_ways(result)
     except Exception as e:
-        print(f"Warning: Could not fetch coastline data: {e}")
+        _log(f"Warning: Could not fetch ocean coastline: {e}")
         return []
+
+
+def _fetch_lake_shoreline(lat: float, lon: float, radius_m: float) -> List[List[Tuple[float, float]]]:
+    """
+    Fetch shorelines from large water bodies (lakes, Great Lakes, etc.)
+    In OSM, these are stored as natural=water polygons.
+    """
+    query = f"""
+    [out:json][timeout:30];
+    (
+      way["natural"="water"](around:{radius_m},{lat},{lon});
+      way["natural"="water"]["water"="lake"](around:{radius_m},{lat},{lon});
+      way["water"="lake"](around:{radius_m},{lat},{lon});
+      relation["natural"="water"](around:{radius_m},{lat},{lon});
+    );
+    out body;
+    >;
+    out skel qt;
+    """
+
+    try:
+        result = fetch_with_retry(query)
+        return _parse_ways(result)
+    except Exception as e:
+        _log(f"Warning: Could not fetch lake shoreline: {e}")
+        return []
+
+
+def get_lake_center(lat: float, lon: float, radius_m: float = 5000) -> Optional[Tuple[float, float]]:
+    """
+    Get the center of the nearest large water body for orientation verification.
+    """
+    query = f"""
+    [out:json][timeout:30];
+    (
+      way["natural"="water"](around:{radius_m},{lat},{lon});
+      relation["natural"="water"](around:{radius_m},{lat},{lon});
+    );
+    out center;
+    """
+
+    try:
+        result = fetch_with_retry(query)
+        for element in result.get('elements', []):
+            if 'center' in element:
+                return (element['center']['lat'], element['center']['lon'])
+            elif element['type'] == 'node':
+                return (element['lat'], element['lon'])
+        return None
+    except Exception:
+        return None
+
+
+def _parse_ways(result: dict) -> List[List[Tuple[float, float]]]:
+    """Parse Overpass result into list of coordinate lists"""
+    nodes = {}
+    ways = []
+
+    for element in result.get('elements', []):
+        if element['type'] == 'node':
+            nodes[element['id']] = (element['lat'], element['lon'])
+        elif element['type'] == 'way':
+            ways.append(element.get('nodes', []))
+
+    # Convert ways to coordinate lists
+    coastlines = []
+    for way in ways:
+        coords = []
+        for node_id in way:
+            if node_id in nodes:
+                coords.append(nodes[node_id])
+        if len(coords) >= 2:
+            coastlines.append(coords)
+
+    return coastlines
 
 
 def fetch_nearby_features(lat: float, lon: float, radius_m: float = 5000) -> Dict:
@@ -264,7 +346,7 @@ def fetch_nearby_features(lat: float, lon: float, radius_m: float = 5000) -> Dic
         return features
 
     except Exception as e:
-        print(f"Warning: Could not fetch feature data: {e}")
+        _log(f"Warning: Could not fetch feature data: {e}")
         return {'capes': [], 'cliffs': [], 'islands': [], 'peninsulas': []}
 
 
@@ -272,14 +354,19 @@ def fetch_nearby_features(lat: float, lon: float, radius_m: float = 5000) -> Dic
 # COASTLINE ANALYSIS
 # ============================================================================
 
+class InlandLocationError(Exception):
+    """Raised when a location has no nearby water body"""
+    pass
+
+
 def analyze_coastline(lat: float, lon: float, radius_m: float = 2000) -> BeachOrientation:
     """
     Analyze coastline near a point to determine beach orientation.
 
     This function:
-    1. Fetches nearby coastline from OSM
+    1. Fetches nearby coastline from OSM (ocean first, then lakes)
     2. Finds the closest coastline segment
-    3. Calculates the ocean-facing direction
+    3. Calculates the water-facing direction
     4. Estimates the view range based on local coastline curvature
     5. Looks for potential obstructions
 
@@ -290,21 +377,35 @@ def analyze_coastline(lat: float, lon: float, radius_m: float = 2000) -> BeachOr
 
     Returns:
         BeachOrientation with calculated values
+
+    Raises:
+        InlandLocationError: if no water body found nearby
     """
-    print(f"Fetching coastline data for {lat:.4f}, {lon:.4f}...")
-    coastlines = fetch_coastline(lat, lon, radius_m)
+    _log(f"Fetching coastline data for {lat:.4f}, {lon:.4f}...")
+    coastline_data = fetch_coastline(lat, lon, radius_m)
 
-    if not coastlines:
+    if not coastline_data.ways:
         # Try with larger radius
-        print(f"No coastline found within {radius_m}m, expanding search...")
+        _log(f"No coastline found within {radius_m}m, expanding search...")
         radius_m = 5000
-        coastlines = fetch_coastline(lat, lon, radius_m)
+        coastline_data = fetch_coastline(lat, lon, radius_m)
 
+    coastlines = coastline_data.ways
+    is_lake = coastline_data.is_lake
     total_points = sum(len(c) for c in coastlines)
-    print(f"Found {len(coastlines)} coastline segments with {total_points} points")
+
+    water_type = "lake shoreline" if is_lake else "coastline"
+    _log(f"Found {len(coastlines)} {water_type} segments with {total_points} points")
 
     if not coastlines:
-        raise ValueError(f"No coastline found within {radius_m}m of {lat}, {lon}")
+        raise InlandLocationError(
+            f"This location appears to be inland - no ocean or lake shoreline found within {radius_m/1000:.0f}km."
+        )
+
+    # For lakes, get the lake center for orientation verification
+    lake_center = None
+    if is_lake:
+        lake_center = get_lake_center(lat, lon, radius_m * 2)
 
     # Find the closest coastline segment to our point
     # Convert lat/lon to approximate x/y for distance calculation
@@ -331,8 +432,11 @@ def analyze_coastline(lat: float, lon: float, radius_m: float = 2000) -> BeachOr
             # Calculate segment bearing (direction of travel along coastline)
             seg_bearing = bearing(lat1, lon1, lat2, lon2)
 
-            # Ocean is to the right of travel direction (OSM convention)
-            # So ocean direction is bearing + 90°
+            # For ocean coastlines: water is on the RIGHT (OSM convention)
+            # For lake polygons: OSM uses right-hand rule for areas, so water
+            # is typically on the RIGHT when walking exterior ring counter-clockwise
+            # However, large lakes like Great Lakes often have reversed winding
+            # We use +90 for both and detect/correct orientation later if needed
             ocean_dir = (seg_bearing + 90) % 360
 
             segment = CoastlineSegment(
@@ -398,11 +502,21 @@ def analyze_coastline(lat: float, lon: float, radius_m: float = 2000) -> BeachOr
         view_half_width = 50
         confidence = "low"
 
+    # For lakes, verify orientation by checking if we're pointing toward the water
+    # If the calculated direction is pointing away from the lake center, flip it
+    if is_lake and lake_center:
+        bearing_to_lake = bearing(lat, lon, lake_center[0], lake_center[1])
+        # Calculate angular difference
+        diff = abs((facing_azimuth - bearing_to_lake + 180) % 360 - 180)
+        if diff > 90:
+            # We're pointing away from the lake - flip the direction
+            facing_azimuth = (facing_azimuth + 180) % 360
+
     ocean_view_start = (facing_azimuth - view_half_width) % 360
     ocean_view_end = (facing_azimuth + view_half_width) % 360
 
     # Fetch nearby features that might cause obstructions
-    print("Checking for nearby headlands, capes, islands...")
+    _log("Checking for nearby headlands, capes, islands...")
     features = fetch_nearby_features(lat, lon, 5000)
 
     headland_warnings = []
@@ -440,7 +554,8 @@ def analyze_coastline(lat: float, lon: float, radius_m: float = 2000) -> BeachOr
         confidence=confidence,
         headland_warnings=headland_warnings,
         analysis_radius_m=radius_m,
-        coastline_points_found=total_points
+        coastline_points_found=total_points,
+        is_lake=is_lake
     )
 
 
@@ -482,6 +597,37 @@ def get_direction_name(azimuth: float) -> str:
 # BEACH LOOKUP FROM OSM
 # ============================================================================
 
+def nominatim_request(url: str, max_retries: int = 3) -> list:
+    """Make a Nominatim request with retry and rate-limit handling"""
+    import time
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
+
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return json.loads(response.read().decode('utf-8'))
+
+        except urllib.error.HTTPError as e:
+            if e.code == 429:  # Rate limited
+                wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
+                if attempt < max_retries - 1:
+                    _log(f"  Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            raise
+        except urllib.error.URLError as e:
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 2
+                _log(f"  Connection error, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise
+
+    return []
+
+
 def geocode_location(query: str) -> Dict:
     """
     Geocode any location query using OSM Nominatim.
@@ -500,11 +646,7 @@ def geocode_location(query: str) -> Dict:
     url = base_url + "?" + urllib.parse.urlencode(params)
 
     try:
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
-
-        with urllib.request.urlopen(req, timeout=10) as response:
-            results = json.loads(response.read().decode('utf-8'))
+        results = nominatim_request(url)
 
         if not results:
             raise ValueError(f"Could not find location: {query}")
@@ -572,7 +714,7 @@ def find_beaches_near(lat: float, lon: float, radius_m: float = 5000) -> List[Di
         return beaches
 
     except Exception as e:
-        print(f"Warning: Beach search failed: {e}")
+        _log(f"Warning: Beach search failed: {e}")
         return []
 
 
@@ -598,11 +740,7 @@ def search_beach_osm(name: str, country: str = None) -> List[Dict]:
     url = base_url + "?" + urllib.parse.urlencode(params)
 
     try:
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'SunsetVisibilityCalculator/1.0')
-
-        with urllib.request.urlopen(req, timeout=10) as response:
-            results = json.loads(response.read().decode('utf-8'))
+        results = nominatim_request(url)
 
         beaches = []
         for r in results:
@@ -625,7 +763,7 @@ def search_beach_osm(name: str, country: str = None) -> List[Dict]:
         return beaches
 
     except Exception as e:
-        print(f"Warning: Beach search failed: {e}")
+        _log(f"Warning: Beach search failed: {e}")
         return []
 
 
